@@ -1,0 +1,7 @@
+name = "ProbeBase"
+uuid = "7b3c9f6b-6d9c-4ea7-b055-3d1c3a6586ed"
+authors = ["Julian P. Samaroo <jpsamaroo@jpsamaroo.me>"]
+version = "0.1.0"
+
+[deps]
+Preferences = "21216c6a-2e73-6563-6e65-726566657250"
