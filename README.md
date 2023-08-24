@@ -2,9 +2,9 @@
 
 The act of composing packages together is a cornerstone of the Julia ecosystem,
 and is further empowered by Julia's excellent multitasking and distributed
-computing support. However, this composabilitiy makes it difficult to
-understand what all of this code is doing, especially when something goes wrong
-deep within the package dependency tree, or when performance as good as desired.
+computing support. However, this composability makes it difficult to understand
+what all of this code is doing, especially when something goes wrong deep
+within the package dependency tree, or when performance as good as desired.
 
 While Debugger.jl and the venerable `println` debugging can help debug issues,
 using these tools requires an intimate understanding of package internals and
@@ -66,7 +66,7 @@ to our probe (which might be interested in their values).
 By default, tracepoints are disabled and no probe is loaded. Let's fix this by
 defining a probe function that will just print out the category, kind (start or
 stop), and arguments for these tracepoints the moment it's called. We'll also
-program our tracepoints with this probe using `set_probe_payload`:
+program our tracepoints with this probe using `set!`:
 
 ```julia
 import ProbeBase
@@ -76,15 +76,15 @@ function simple_probe(category, kind, _, args...)
     return 0
 end
 
-ProbeBase.set_probe_payload(simple_probe, MyMod)
+ProbeBase.set!(simple_probe, MyMod)
 ```
 
 Our `simple_probe` is now attached to all of the tracepoints within `MyMod`,
-although it's not yet enabled - let's do that now, and see what happens when we
+although it's not yet enabled - let's do that now with `enable!`, and see what happens when we
 call `do_work`:
 
 ```julia
-ProbeBase.enable_probes(MyMod)
+ProbeBase.enable!(MyMod)
 
 MyMod.do_work("abc", 123)
 
@@ -103,3 +103,15 @@ region. We can see how the categories line up as expected, and that `@region`
 calls can be safely nested. Also, we see that the arguments are evaluated at
 each tracepoint site, so we get to see the results of calling `do_first_piece`
 and `do_second_piece`.
+
+When we're ready to disable our probes, we can call `disable!` and use our
+function like normal, without any of the overhead of running our `simple_probe`
+at tracepoints:
+
+```julia
+ProbeBase.disable!(MyMod)
+
+MyMod.do_work("abc", 123)
+
+# Nothing is printed, as `simple_probe` is no longer called
+```

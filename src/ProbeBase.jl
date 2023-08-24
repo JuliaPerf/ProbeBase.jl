@@ -2,7 +2,7 @@ module ProbeBase
 
 using Preferences
 
-export @probe, @region_start, @region_finish, @region
+export @tracepoint, @region_start, @region_finish, @region
 
 const PROBES_ENABLED = parse(Bool, @load_preference("default_enabled", "false"))
 
@@ -10,153 +10,153 @@ default_enabled(val::Bool) = @set_preferences!("default_enabled" => repr(val))
 
 abstract type AbstractPayload end
 
-struct ProbeSpec
+struct TracepointSpec
     lineno::LineNumberNode
     argtypes::Vector{DataType}
     payload::Base.RefValue{Ptr{Cvoid}}
     semaphore::Threads.Atomic{Int}
 end
-ProbeSpec(lineno::LineNumberNode, argtypes::Vector, payload::Ptr{Cvoid}=C_NULL) =
-    ProbeSpec(lineno, argtypes,
+TracepointSpec(lineno::LineNumberNode, argtypes::Vector, payload::Ptr{Cvoid}=C_NULL) =
+    TracepointSpec(lineno, argtypes,
               Ref(payload),
               Threads.Atomic{Int}(PROBES_ENABLED))
 
-function set_probe_payload(payload::Ptr{Cvoid})
+function set!(payload::Ptr{Cvoid})
     for mod in values(Base.loaded_modules)
         if isdefined(mod, :__probebase_lock__)
-            set_probe_payload(mod, payload)
+            set!(mod, payload)
         end
     end
 end
-function set_probe_payload(f::Base.Callable)
+function set!(f::Base.Callable)
     for mod in values(Base.loaded_modules)
         if isdefined(mod, :__probebase_lock__)
-            set_probe_payload(f, mod)
+            set!(f, mod)
         end
     end
 end
-function set_probe_payload(mod::Module, payload::Ptr{Cvoid})
+function set!(mod::Module, payload::Ptr{Cvoid})
     categories = lock(mod.__probebase_lock__) do
-        collect(keys(mod.__probebase_probes__))
+        collect(keys(mod.__probebase_tracepoints__))
     end
     for category in categories
-        set_probe_payload(mod, category, payload)
+        set!(mod, category, payload)
     end
 end
-function set_probe_payload(f::Base.Callable, mod::Module)
+function set!(f::Base.Callable, mod::Module)
     categories = lock(mod.__probebase_lock__) do
-        collect(keys(mod.__probebase_probes__))
+        collect(keys(mod.__probebase_tracepoints__))
     end
     for category in categories
-        set_probe_payload(f, mod, category)
+        set!(f, mod, category)
     end
 end
-function set_probe_payload(mod::Module, category::Symbol, payload::Ptr{Cvoid})
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
-    lock(probe_lock) do
-        for spec in values(probes[category])
+function set!(mod::Module, category::Symbol, payload::Ptr{Cvoid})
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
+    lock(mod_lock) do
+        for spec in values(tracepoints[category])
             spec.payload[] = payload
         end
     end
 end
-function set_probe_payload(mod::Module, category::Symbol, kind::Symbol, payload::Ptr{Cvoid})
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
-    lock(probe_lock) do
-        probes[category][kind].payload[] = payload
+function set!(mod::Module, category::Symbol, kind::Symbol, payload::Ptr{Cvoid})
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
+    lock(mod_lock) do
+        tracepoints[category][kind].payload[] = payload
     end
 end
-function set_probe_payload(f, mod::Module, category::Symbol)
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
+function set!(f, mod::Module, category::Symbol)
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
     funcs = mod.__probebase_funcs__
-    specs = lock(probe_lock) do
-        probes[category]
+    specs = lock(mod_lock) do
+        tracepoints[category]
     end
     for (kind, spec) in specs
         ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, $(spec.argtypes...),))))
-        lock(probe_lock) do
-            probes[category][kind].payload[] = ptr
+        lock(mod_lock) do
+            tracepoints[category][kind].payload[] = ptr
             funcs[category][kind] = f
         end
     end
 end
-function set_probe_payload(f, mod::Module, category::Symbol, kind::Symbol)
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
+function set!(f, mod::Module, category::Symbol, kind::Symbol)
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
     funcs = mod.__probebase_funcs__
-    spec = lock(probe_lock) do
-        probes[category][kind]
+    spec = lock(mod_lock) do
+        tracepoints[category][kind]
     end
     ptr = eval(:(@cfunction($f, Cvoid, ($(spec.argtypes...),))))
-    lock(probe_lock) do
-        probes[category][kind].payload[] = ptr
+    lock(mod_lock) do
+        tracepoints[category][kind].payload[] = ptr
         funcs[category][kind] = f
     end
 end
-function enable_probes(mod::Module)
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
-    lock(probe_lock) do
-        for spec_dict in values(probes)
+function enable!(mod::Module)
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
+    lock(mod_lock) do
+        for spec_dict in values(tracepoints)
             for spec in values(spec_dict)
                 Threads.atomic_add!(spec.semaphore, 1)
             end
         end
     end
 end
-function disable_probes(mod::Module)
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
-    lock(probe_lock) do
-        for spec_dict in values(probes)
+function disable!(mod::Module)
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
+    lock(mod_lock) do
+        for spec_dict in values(tracepoints)
             for spec in values(spec_dict)
                 Threads.atomic_sub!(spec.semaphore, 1)
             end
         end
     end
 end
-function enable_probe(mod::Module, category::Symbol)
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
-    lock(probe_lock) do
-        for spec in values(probes[category])
+function enable!(mod::Module, category::Symbol)
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
+    lock(mod_lock) do
+        for spec in values(tracepoints[category])
             Threads.atomic_add!(spec.semaphore, 1)
         end
     end
 end
-function disable_probe(mod::Module, category::Symbol)
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
-    lock(probe_lock) do
-        for spec in values(probes[category])
+function disable!(mod::Module, category::Symbol)
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
+    lock(mod_lock) do
+        for spec in values(tracepoints[category])
             Threads.atomic_sub!(spec.semaphore, 1)
         end
     end
 end
-function enable_probe(mod::Module, category::Symbol, kind::Symbol)
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
-    lock(probe_lock) do
-        Threads.atomic_add!(probes[category][kind].semaphore, 1)
+function enable!(mod::Module, category::Symbol, kind::Symbol)
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
+    lock(mod_lock) do
+        Threads.atomic_add!(tracepoints[category][kind].semaphore, 1)
     end
 end
-function disable_probe(mod::Module, category::Symbol, kind::Symbol)
-    probe_lock = mod.__probebase_lock__
-    probes = mod.__probebase_probes__
-    lock(probe_lock) do
-        Threads.atomic_sub!(probes[category][kind].semaphore, 1)
+function disable!(mod::Module, category::Symbol, kind::Symbol)
+    mod_lock = mod.__probebase_lock__
+    tracepoints = mod.__probebase_tracepoints__
+    lock(mod_lock) do
+        Threads.atomic_sub!(tracepoints[category][kind].semaphore, 1)
     end
 end
 
-probe_enabled(spec::ProbeSpec) = spec.semaphore[] > 0
-function probe_maybe_trigger(spec::ProbeSpec, category::Symbol, kind::Symbol, lib_id::Int64, args...)
+probe_enabled(spec::TracepointSpec) = spec.semaphore[] > 0
+function probe_maybe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, args...)
     if probe_enabled(spec)
         probe_trigger(spec, category, kind, lib_id, args...)
     end
 end
-@generated function probe_trigger(spec::ProbeSpec, category::Symbol, kind::Symbol, lib_id::Int64, args...)
+@generated function probe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, args...)
     Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, map(nameof, args)...)
     ex = Expr(:call, :ccall, :(spec.payload[]), :Int64, Targs)
     push!(ex.args, :(category))
@@ -168,27 +168,27 @@ end
     return ex
 end
 
-function register_probe(mod::Module, category::Symbol, kind::Symbol, spec::ProbeSpec; enable=false)
+function register_probe(mod::Module, category::Symbol, kind::Symbol, spec::TracepointSpec; enable=false)
     if enable
         spec.semaphore[] = 1
     end
     if !isdefined(mod, :__probebase_lock__)
-        probes_lock = mod.eval(:(__probebase_lock__ = Threads.ReentrantLock()))
-        probes = mod.eval(:(__probebase_probes__ = Dict{Symbol,Dict{Symbol,$ProbeSpec}}()))
-        probe_funcs = mod.eval(:(__probebase_funcs__ = Dict{Symbol,Dict{Symbol,Any}}()))
+        mod_lock = mod.eval(:(__probebase_lock__ = Threads.ReentrantLock()))
+        tracepoints = mod.eval(:(__probebase_tracepoints__ = Dict{Symbol,Dict{Symbol,$TracepointSpec}}()))
+        funcs = mod.eval(:(__probebase_funcs__ = Dict{Symbol,Dict{Symbol,Any}}()))
     else
-        probes_lock = mod.__probebase_lock__
-        probes = mod.__probebase_probes__
-        probe_funcs = mod.__probebase_funcs__
+        mod_lock = mod.__probebase_lock__
+        tracepoints = mod.__probebase_tracepoints__
+        funcs = mod.__probebase_funcs__
     end
-    lock(probes_lock) do
-        module_cat_specs = get!(probes, category) do
-            Dict{Symbol,ProbeSpec}()
+    lock(mod_lock) do
+        module_cat_specs = get!(tracepoints, category) do
+            Dict{Symbol,TracepointSpec}()
         end
         module_cat_specs[kind] = spec
 
-        module_cat_funcs = get!(probe_funcs, category) do
-            Dict{Symbol,ProbeSpec}()
+        module_cat_funcs = get!(funcs, category) do
+            Dict{Symbol,TracepointSpec}()
         end
         module_cat_funcs[kind] = nothing
     end
@@ -212,9 +212,9 @@ function parse_args(mod::Module, args)
     end
     (;argnames, argtypes, argvalues)
 end
-function create_probe!(mod::Module, source, category::Symbol, kind::Symbol, args::Expr)
+function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol, args::Expr)
     argspec = parse_args(mod, args)
-    spec = ProbeSpec(source, argspec.argtypes)
+    spec = TracepointSpec(source, argspec.argtypes)
     register_probe(mod, category, kind, spec)
     #args_nt_ex = E
     #@gensym args_nt
@@ -227,14 +227,14 @@ function create_probe!(mod::Module, source, category::Symbol, kind::Symbol, args
         end
     end
 end
-macro probe(kind::QuoteNode, category::QuoteNode, args=Expr(:tuple))
-    create_probe!(__module__, __source__, category.value, kind.value, args)
+macro tracepoint(kind::QuoteNode, category::QuoteNode, args=Expr(:tuple))
+    create_tracepoint!(__module__, __source__, category.value, kind.value, args)
 end
 macro region_start(category::QuoteNode, args=Expr(:tuple))
-    create_probe!(__module__, __source__, category.value, :start, args)
+    create_tracepoint!(__module__, __source__, category.value, :start, args)
 end
 macro region_finish(category::QuoteNode, args=Expr(:tuple))
-    create_probe!(__module__, __source__, category.value, :finish, args)
+    create_tracepoint!(__module__, __source__, category.value, :finish, args)
 end
 
 function parse_region_args(args::Expr)
@@ -256,11 +256,11 @@ macro region(category::QuoteNode, _args...)
     ex = _args[end]
     start_args, finish_args = parse_region_args(args)
     quote
-        $(create_probe!(__module__, __source__, category.value, :start, start_args))
+        $(create_tracepoint!(__module__, __source__, category.value, :start, start_args))
         try
             $(esc(ex))
         finally
-            $(create_probe!(__module__, __source__, category.value, :finish, finish_args))
+            $(create_tracepoint!(__module__, __source__, category.value, :finish, finish_args))
         end
     end
 end
