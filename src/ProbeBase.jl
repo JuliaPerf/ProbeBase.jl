@@ -2,101 +2,209 @@ module ProbeBase
 
 using Preferences
 
-abstract type AbstractPayload end
+export @probe, @region_start, @region_finish, @region
 
-function null_payload(x...) end
+const PROBES_ENABLED = parse(Bool, @load_preference("default_enabled", "false"))
+
+default_enabled(val::Bool) = @set_preferences!("default_enabled" => repr(val))
+
+abstract type AbstractPayload end
 
 struct ProbeSpec
     lineno::LineNumberNode
-    kind::Symbol
     argtypes::Vector{DataType}
     payload::Base.RefValue{Ptr{Cvoid}}
     semaphore::Threads.Atomic{Int}
 end
-ProbeSpec(lineno::LineNumberNode, kind::Symbol, argtypes::Vector, payload::Ptr{Cvoid}) =
-    ProbeSpec(lineno, kind, argtypes,
-              Ref(payload), Threads.Atomic{Int}(PROBES_ENABLED))
-ProbeSpec(lineno::LineNumberNode, kind::Symbol, argtypes::Vector) =
-    ProbeSpec(lineno, kind, argtypes,
-              # null_payload is varargs, and doesn't use arguments anyway
-              Ref(@cfunction(null_payload, Cvoid, ())),
+ProbeSpec(lineno::LineNumberNode, argtypes::Vector, payload::Ptr{Cvoid}=C_NULL) =
+    ProbeSpec(lineno, argtypes,
+              Ref(payload),
               Threads.Atomic{Int}(PROBES_ENABLED))
 
-const PROBES = Dict{Module,Dict{Symbol,ProbeSpec}}()
-const PROBES_FUNC = Dict{Module,Dict{Symbol,Any}}()
-const PROBES_ENABLED = parse(Bool, @load_preference("default_enabled", "false"))
-const PROBES_LOCK = Threads.ReentrantLock()
-
-default_enabled(val::Bool) = @set_preferences!("default_enabled" => repr(val))
-
+function set_probe_payload(payload::Ptr{Cvoid})
+    for mod in values(Base.loaded_modules)
+        if isdefined(mod, :__probebase_lock__)
+            set_probe_payload(mod, payload)
+        end
+    end
+end
+function set_probe_payload(f::Base.Callable)
+    for mod in values(Base.loaded_modules)
+        if isdefined(mod, :__probebase_lock__)
+            set_probe_payload(f, mod)
+        end
+    end
+end
+function set_probe_payload(mod::Module, payload::Ptr{Cvoid})
+    categories = lock(mod.__probebase_lock__) do
+        collect(keys(mod.__probebase_probes__))
+    end
+    for category in categories
+        set_probe_payload(mod, category, payload)
+    end
+end
+function set_probe_payload(f::Base.Callable, mod::Module)
+    categories = lock(mod.__probebase_lock__) do
+        collect(keys(mod.__probebase_probes__))
+    end
+    for category in categories
+        set_probe_payload(f, mod, category)
+    end
+end
 function set_probe_payload(mod::Module, category::Symbol, payload::Ptr{Cvoid})
-    lock(PROBES_LOCK) do
-        PROBES[mod][category].payload[] = payload
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    lock(probe_lock) do
+        for spec in values(probes[category])
+            spec.payload[] = payload
+        end
+    end
+end
+function set_probe_payload(mod::Module, category::Symbol, kind::Symbol, payload::Ptr{Cvoid})
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    lock(probe_lock) do
+        probes[category][kind].payload[] = payload
     end
 end
 function set_probe_payload(f, mod::Module, category::Symbol)
-    spec = nothing
-    lock(PROBES_LOCK) do
-        spec = PROBES[mod][category]
-        PROBES_FUNC[mod][category] = f
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    funcs = mod.__probebase_funcs__
+    specs = lock(probe_lock) do
+        probes[category]
+    end
+    for (kind, spec) in specs
+        ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, $(spec.argtypes...),))))
+        lock(probe_lock) do
+            probes[category][kind].payload[] = ptr
+            funcs[category][kind] = f
+        end
+    end
+end
+function set_probe_payload(f, mod::Module, category::Symbol, kind::Symbol)
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    funcs = mod.__probebase_funcs__
+    spec = lock(probe_lock) do
+        probes[category][kind]
     end
     ptr = eval(:(@cfunction($f, Cvoid, ($(spec.argtypes...),))))
-    set_probe_payload(mod, category, ptr)
-end
-function enable_probe(mod::Module, category::Symbol)
-    spec = lock(PROBES_LOCK) do
-        PROBES[mod][category]
+    lock(probe_lock) do
+        probes[category][kind].payload[] = ptr
+        funcs[category][kind] = f
     end
-    Threads.atomic_add!(spec.semaphore, 1)
-end
-function disable_probe(mod::Module, category::Symbol)
-    spec = lock(PROBES_LOCK) do
-        PROBES[mod][category]
-    end
-    Threads.atomic_sub!(spec.semaphore, 1)
 end
 function enable_probes(mod::Module)
-    lock(PROBES_LOCK) do
-        for spec in values(PROBES[mod])
-            Threads.atomic_add!(spec.semaphore, 1)
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    lock(probe_lock) do
+        for spec_dict in values(probes)
+            for spec in values(spec_dict)
+                Threads.atomic_add!(spec.semaphore, 1)
+            end
         end
     end
 end
 function disable_probes(mod::Module)
-    lock(PROBES_LOCK) do
-        for spec in values(PROBES[mod])
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    lock(probe_lock) do
+        for spec_dict in values(probes)
+            for spec in values(spec_dict)
+                Threads.atomic_sub!(spec.semaphore, 1)
+            end
+        end
+    end
+end
+function enable_probe(mod::Module, category::Symbol)
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    lock(probe_lock) do
+        for spec in values(probes[category])
+            Threads.atomic_add!(spec.semaphore, 1)
+        end
+    end
+end
+function disable_probe(mod::Module, category::Symbol)
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    lock(probe_lock) do
+        for spec in values(probes[category])
             Threads.atomic_sub!(spec.semaphore, 1)
         end
     end
 end
+function enable_probe(mod::Module, category::Symbol, kind::Symbol)
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    lock(probe_lock) do
+        Threads.atomic_add!(probes[category][kind].semaphore, 1)
+    end
+end
+function disable_probe(mod::Module, category::Symbol, kind::Symbol)
+    probe_lock = mod.__probebase_lock__
+    probes = mod.__probebase_probes__
+    lock(probe_lock) do
+        Threads.atomic_sub!(probes[category][kind].semaphore, 1)
+    end
+end
 
 probe_enabled(spec::ProbeSpec) = spec.semaphore[] > 0
-@generated function probe_trigger(spec::ProbeSpec, args...)
-    Targs = Expr(:tuple, map(nameof, args)...)
-    ex = Expr(:call, :ccall, :(spec.payload[]), :Cvoid, Targs)
+function probe_maybe_trigger(spec::ProbeSpec, category::Symbol, kind::Symbol, lib_id::Int64, args...)
+    if probe_enabled(spec)
+        probe_trigger(spec, category, kind, lib_id, args...)
+    end
+end
+@generated function probe_trigger(spec::ProbeSpec, category::Symbol, kind::Symbol, lib_id::Int64, args...)
+    Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, map(nameof, args)...)
+    ex = Expr(:call, :ccall, :(spec.payload[]), :Int64, Targs)
+    push!(ex.args, :(category))
+    push!(ex.args, :(kind))
+    push!(ex.args, :(lib_id))
     for (idx, arg) in enumerate(args)
         push!(ex.args, :(args[$idx]))
     end
-    ex
-end
-function probe_maybe_trigger(spec::ProbeSpec, kind::Symbol, args...)
-    if probe_enabled(spec)
-        probe_trigger(spec, args...)
-    end
+    return ex
 end
 
-function parse_args(args)
+function register_probe(mod::Module, category::Symbol, kind::Symbol, spec::ProbeSpec; enable=false)
+    if enable
+        spec.semaphore[] = 1
+    end
+    if !isdefined(mod, :__probebase_lock__)
+        probes_lock = mod.eval(:(__probebase_lock__ = Threads.ReentrantLock()))
+        probes = mod.eval(:(__probebase_probes__ = Dict{Symbol,Dict{Symbol,$ProbeSpec}}()))
+        probe_funcs = mod.eval(:(__probebase_funcs__ = Dict{Symbol,Dict{Symbol,Any}}()))
+    else
+        probes_lock = mod.__probebase_lock__
+        probes = mod.__probebase_probes__
+        probe_funcs = mod.__probebase_funcs__
+    end
+    lock(probes_lock) do
+        module_cat_specs = get!(probes, category) do
+            Dict{Symbol,ProbeSpec}()
+        end
+        module_cat_specs[kind] = spec
+
+        module_cat_funcs = get!(probe_funcs, category) do
+            Dict{Symbol,ProbeSpec}()
+        end
+        module_cat_funcs[kind] = nothing
+    end
+end
+function parse_args(mod::Module, args)
     argnames = Symbol[]
     argtypes = DataType[]
     argvalues = Expr[]
     for arg in args.args
         if Meta.isexpr(arg, :(=))
             push!(argnames, arg.args[1].args[1])
-            push!(argtypes, eval(arg.args[1].args[2]))
+            push!(argtypes, mod.eval(arg.args[1].args[2]))
             push!(argvalues, esc(arg.args[2]))
         elseif Meta.isexpr(arg, :(::))
             push!(argnames, arg.args[1])
-            push!(argtypes, eval(arg.args[2]))
+            push!(argtypes, mod.eval(arg.args[2]))
             push!(argvalues, esc(arg.args[1]))
         else
             throw(ArgumentError("Cannot handle expr with head: $(arg.head)"))
@@ -104,36 +212,57 @@ function parse_args(args)
     end
     (;argnames, argtypes, argvalues)
 end
-function register_probe(mod::Module, category::Symbol, spec::ProbeSpec; enable=false)
-    if enable
-        spec.semaphore[] = 1
-    end
-    lock(PROBES_LOCK) do
-        module_specs = get!(PROBES, mod) do
-            Dict{Symbol,ProbeSpec}()
+function create_probe!(mod::Module, source, category::Symbol, kind::Symbol, args::Expr)
+    argspec = parse_args(mod, args)
+    spec = ProbeSpec(source, argspec.argtypes)
+    register_probe(mod, category, kind, spec)
+    #args_nt_ex = E
+    #@gensym args_nt
+    return quote
+        if $probe_enabled($spec)
+            # FIXME: Pass lib_id
+            #let $args_nt = NamedTuple($argspec.argvalues...)
+                $probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), 0, $(argspec.argvalues...))
+            #end
         end
-        module_specs[category] = spec
-        (get!(PROBES_FUNC, mod) do
-            Dict{Symbol,Any}()
-        end)[category] = nothing
     end
 end
 macro probe(kind::QuoteNode, category::QuoteNode, args=Expr(:tuple))
-    argspec = parse_args(args)
-    spec = ProbeSpec(__source__, kind.value, argspec.argtypes)
-    register_probe(__module__, category.value, spec)
-    :(probe_maybe_trigger($spec, $kind, $(argspec.argvalues...)))
+    create_probe!(__module__, __source__, category.value, kind.value, args)
 end
-#= FIXME
-macro probe_start(category::Symbol)
-    :(probe($spec, :start))
+macro region_start(category::QuoteNode, args=Expr(:tuple))
+    create_probe!(__module__, __source__, category.value, :start, args)
 end
-macro probe_stop(category::Symbol)
-    :(probe($spec, :stop))
+macro region_finish(category::QuoteNode, args=Expr(:tuple))
+    create_probe!(__module__, __source__, category.value, :finish, args)
 end
-macro probe_event(category::Symbol)
-    :(probe($spec, :event))
+
+function parse_region_args(args::Expr)
+    start_args = Expr(:tuple)
+    finish_args = Expr(:tuple)
+    for arg in args.args
+        if Meta.isexpr(arg, :(=)) && Meta.isexpr(arg.args[1], :tuple)
+            push!(start_args.args, arg.args[1].args[1])
+            push!(finish_args.args, arg.args[1].args[2])
+        else
+            push!(start_args.args, arg)
+            push!(finish_args.args, arg)
+        end
+    end
+    return start_args, finish_args
 end
-=#
+macro region(category::QuoteNode, _args...)
+    args = Expr(:tuple, _args[1:end-1]...)
+    ex = _args[end]
+    start_args, finish_args = parse_region_args(args)
+    quote
+        $(create_probe!(__module__, __source__, category.value, :start, start_args))
+        try
+            $(esc(ex))
+        finally
+            $(create_probe!(__module__, __source__, category.value, :finish, finish_args))
+        end
+    end
+end
 
 end # module
