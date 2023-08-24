@@ -75,7 +75,8 @@ function set!(f, mod::Module, category::Symbol)
         tracepoints[category]
     end
     for (kind, spec) in specs
-        ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, $(spec.argtypes...),))))
+        #ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, $(spec.argtypes...),))))
+        ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Any))))
         lock(mod_lock) do
             tracepoints[category][kind].payload[] = ptr
             funcs[category][kind] = f
@@ -156,15 +157,18 @@ function probe_maybe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbo
         probe_trigger(spec, category, kind, lib_id, args...)
     end
 end
-@generated function probe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, args...)
-    Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, map(nameof, args)...)
+@generated function probe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, arg)
+    Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Any) #map(nameof, args)...)
     ex = Expr(:call, :ccall, :(spec.payload[]), :Int64, Targs)
     push!(ex.args, :(category))
     push!(ex.args, :(kind))
     push!(ex.args, :(lib_id))
+    push!(ex.args, :(arg))
+    #=
     for (idx, arg) in enumerate(args)
         push!(ex.args, :(args[$idx]))
     end
+    =#
     return ex
 end
 
@@ -216,14 +220,13 @@ function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol,
     argspec = parse_args(mod, args)
     spec = TracepointSpec(source, argspec.argtypes)
     register_probe(mod, category, kind, spec)
-    #args_nt_ex = E
-    #@gensym args_nt
+    T_nt = NamedTuple{(argspec.argnames...,), Tuple{argspec.argtypes...,}}
+    args_ex = Expr(:tuple, argspec.argvalues...)
     return quote
         if $probe_enabled($spec)
             # FIXME: Pass lib_id
-            #let $args_nt = NamedTuple($argspec.argvalues...)
-                $probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), 0, $(argspec.argvalues...))
-            #end
+            #$probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), 0, $(argspec.argvalues...))
+            $probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), 0, $T_nt($args_ex))
         end
     end
 end

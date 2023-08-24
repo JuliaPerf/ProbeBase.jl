@@ -65,13 +65,14 @@ to our probe (which might be interested in their values).
 
 By default, tracepoints are disabled and no probe is loaded. Let's fix this by
 defining a probe function that will just print out the category, kind (start or
-stop), and arguments for these tracepoints the moment it's called. We'll also
-program our tracepoints with this probe using `set!`:
+stop), and arguments for these tracepoints the moment it's called (provided to
+the probe as a `NamedTuple`). We'll also program our tracepoints with this
+probe using `set!`:
 
 ```julia
 import ProbeBase
 
-function simple_probe(category, kind, _, args...)
+function simple_probe(category, kind, _, args)
     println("Probe triggered: category: $category, kind: $kind, arguments: $args")
     return 0
 end
@@ -89,12 +90,12 @@ ProbeBase.enable!(MyMod)
 MyMod.do_work("abc", 123)
 
 # Output:
-Probe triggered: category: do_work, kind: start, arguments: ()
-Probe triggered: category: do_first_piece, kind: start, arguments: ("abc",)
-Probe triggered: category: do_first_piece, kind: finish, arguments: ("abcd",)
-Probe triggered: category: do_second_piece, kind: start, arguments: (123,)
-Probe triggered: category: do_second_piece, kind: finish, arguments: (165,)
-Probe triggered: category: do_work, kind: finish, arguments: ()
+Probe triggered: category: do_work, kind: start, arguments: NamedTuple()
+Probe triggered: category: do_first_piece, kind: start, arguments: (x = "abc",)
+Probe triggered: category: do_first_piece, kind: finish, arguments: (x = "abcd",)
+Probe triggered: category: do_second_piece, kind: start, arguments: (y = 123,)
+Probe triggered: category: do_second_piece, kind: finish, arguments: (y = 165,)
+Probe triggered: category: do_work, kind: finish, arguments: NamedTuple()
 ```
 
 We can see that the `@region` macro creates two tracepoints: a start tracepoint
