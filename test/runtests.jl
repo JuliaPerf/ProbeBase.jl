@@ -1,9 +1,12 @@
 import ProbeBase
 using Test
 
+ctr = Threads.Atomic{Int}(1)
+
 function eval_new_mod(ex)
+    modname = Symbol("ProbedModule", Threads.atomic_add!(ctr, 1))
     eval(
-        :(module ProbedModule
+        :(module $modname
             using ProbeBase
 
             # Our instrumented function
@@ -140,12 +143,27 @@ end
     @test_throws UndefVarError test_region(:(@region :test z::Int nothing); valid=false)
 
     # Missing type
-    @test_throws ArgumentError test_region(:(@region :test x nothing); valid=false)
+    try
+        test_region(:(@region :test x nothing); valid=false)
+        @test false
+    catch err
+        @test err isa LoadError && err.error isa ArgumentError && startswith(err.error.msg, "Tracepoint argument must have a type specifier")
+    end
 
     # Bad category
-    @test_throws ArgumentError test_region(:(@region "test" x::String nothing); valid=false)
-    @test_throws ArgumentError test_region(:(begin
-        cat = :test
-        @region cat x::String nothing
-    end); valid=false)
+    try
+        test_region(:(@region "test" x::String nothing); valid=false)
+        @test false
+    catch err
+        @test err isa LoadError && err.error isa ArgumentError && startswith(err.error.msg, "@region: category must be a literal")
+    end
+    try
+        test_region(:(begin
+            cat = :test
+            @region cat x::String nothing
+        end); valid=false)
+        @test false
+    catch err
+        @test err isa LoadError && err.error isa ArgumentError && startswith(err.error.msg, "@region: category must be a literal")
+    end
 end
