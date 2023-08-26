@@ -21,29 +21,66 @@ TracepointSpec(lineno::LineNumberNode, argtypes::Vector, payload::Ptr{Cvoid}=C_N
               Ref(payload),
               Threads.Atomic{Int}(PROBES_ENABLED))
 
-function set!(payload::Ptr{Cvoid})
-    for mod in values(Base.loaded_modules)
-        if isdefined(mod, :__probebase_lock__)
-            set!(mod, payload)
-        end
-    end
-end
-function set!(f::Base.Callable)
+"""
+    set!(f)
+    set!(f, mod::Module)
+    set!(f, mod::Module, category::Symbol)
+    set!(f, mod::Module, category::Symbol, kind::Symbol)
+
+Sets the probe payload for one or more tracepoints to `f`, which may either be
+a function, or a pointer to a function. If `kind` is unspecified, then all
+tracepoints with category `category` are programmed; if `category` is also
+unspecified, then all tracepoints in `mod` are programmed. If `mod` is
+unspecified, then all tracepoints in all loaded modules are programmed.
+
+This function only programs the probe that tracepoints with call, but does not
+enable those tracepoints; [`enable!`](@ref) must be called to cause the
+tracepoints to execute their probe function.
+"""
+function set! end
+
+"""
+    enable!(mod::Module)
+    enable!(mod::Module, category::Symbol)
+    enable!(mod::Module, category::Symbol, kind::Symbol)
+
+Enables one or more tracepoints. If `kind` is unspecified, then all tracepoints
+with category `category` are enabled; if `category` is also unspecified, then
+all tracepoints in `mod` are enabled. If `mod` is unspecified, then all
+tracepoints in all loaded modules are enabled.
+
+This function only enables tracepoints, but does not program them with a probe
+payload; [`set!`](@ref) must be called to program the tracepoints with an
+appropriate probe.
+
+This function is the counterpart to [`disable!`](ref), which can be called to
+undo a call to `enable!`.
+"""
+function enable! end
+
+"""
+    disable!(mod::Module)
+    disable!(mod::Module, category::Symbol)
+    disable!(mod::Module, category::Symbol, kind::Symbol)
+
+Disables one or more tracepoints. If `kind` is unspecified, then all tracepoints
+with category `category` are disabled; if `category` is also unspecified, then
+all tracepoints in `mod` are disabled. If `mod` is unspecified, then all
+tracepoints in all loaded modules are disabled.
+
+This function is the counterpart to [`enable!`](ref), which can be called to
+undo a call to `disable!`.
+"""
+function disable! end
+
+function set!(f::Union{Base.Callable, Ptr{Cvoid}})
     for mod in values(Base.loaded_modules)
         if isdefined(mod, :__probebase_lock__)
             set!(f, mod)
         end
     end
 end
-function set!(mod::Module, payload::Ptr{Cvoid})
-    categories = lock(mod.__probebase_lock__) do
-        collect(keys(mod.__probebase_tracepoints__))
-    end
-    for category in categories
-        set!(mod, category, payload)
-    end
-end
-function set!(f::Base.Callable, mod::Module)
+function set!(f::Union{Base.Callable, Ptr{Cvoid}}, mod::Module)
     categories = lock(mod.__probebase_lock__) do
         collect(keys(mod.__probebase_tracepoints__))
     end
@@ -51,7 +88,7 @@ function set!(f::Base.Callable, mod::Module)
         set!(f, mod, category)
     end
 end
-function set!(mod::Module, category::Symbol, payload::Ptr{Cvoid})
+function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol)
     mod_lock = mod.__probebase_lock__
     tracepoints = mod.__probebase_tracepoints__
     lock(mod_lock) do
@@ -60,7 +97,7 @@ function set!(mod::Module, category::Symbol, payload::Ptr{Cvoid})
         end
     end
 end
-function set!(mod::Module, category::Symbol, kind::Symbol, payload::Ptr{Cvoid})
+function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol, kind::Symbol)
     mod_lock = mod.__probebase_lock__
     tracepoints = mod.__probebase_tracepoints__
     lock(mod_lock) do
@@ -75,7 +112,6 @@ function set!(f, mod::Module, category::Symbol)
         tracepoints[category]
     end
     for (kind, spec) in specs
-        #ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, $(spec.argtypes...),))))
         ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Any))))
         lock(mod_lock) do
             tracepoints[category][kind].payload[] = ptr
@@ -90,12 +126,13 @@ function set!(f, mod::Module, category::Symbol, kind::Symbol)
     spec = lock(mod_lock) do
         tracepoints[category][kind]
     end
-    ptr = eval(:(@cfunction($f, Cvoid, ($(spec.argtypes...),))))
+    ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Any))))
     lock(mod_lock) do
         tracepoints[category][kind].payload[] = ptr
         funcs[category][kind] = f
     end
 end
+
 function enable!(mod::Module)
     mod_lock = mod.__probebase_lock__
     tracepoints = mod.__probebase_tracepoints__
@@ -158,17 +195,12 @@ function probe_maybe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbo
     end
 end
 @generated function probe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, arg)
-    Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Any) #map(nameof, args)...)
+    Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Any)
     ex = Expr(:call, :ccall, :(spec.payload[]), :Int64, Targs)
     push!(ex.args, :(category))
     push!(ex.args, :(kind))
     push!(ex.args, :(lib_id))
     push!(ex.args, :(arg))
-    #=
-    for (idx, arg) in enumerate(args)
-        push!(ex.args, :(args[$idx]))
-    end
-    =#
     return ex
 end
 
@@ -210,13 +242,17 @@ function parse_args(mod::Module, args)
             push!(argnames, arg.args[1])
             push!(argtypes, mod.eval(arg.args[2]))
             push!(argvalues, esc(arg.args[1]))
+        elseif arg isa Expr
+            throw(ArgumentError("Tracepoint argument unsupported: `Expr` with head: $(arg.head)"))
+        elseif arg isa Symbol
+            throw(ArgumentError("Tracepoint argument must have a type specifier: $arg"))
         else
-            throw(ArgumentError("Cannot handle expr with head: $(arg.head)"))
+            throw(ArgumentError("Tracepoint argument unsupported: $arg"))
         end
     end
     (;argnames, argtypes, argvalues)
 end
-function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol, args::Expr)
+function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol, lib_id, args::Expr)
     argspec = parse_args(mod, args)
     spec = TracepointSpec(source, argspec.argtypes)
     register_probe(mod, category, kind, spec)
@@ -224,22 +260,66 @@ function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol,
     args_ex = Expr(:tuple, argspec.argvalues...)
     return quote
         if $probe_enabled($spec)
-            # FIXME: Pass lib_id
-            #$probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), 0, $(argspec.argvalues...))
-            $probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), 0, $T_nt($args_ex))
+            $probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), $lib_id, $T_nt($args_ex))
         end
     end
 end
-macro tracepoint(kind::QuoteNode, category::QuoteNode, args=Expr(:tuple))
-    create_tracepoint!(__module__, __source__, category.value, kind.value, args)
+macro tracepoint(kind::QuoteNode, category::QuoteNode, lib_id, args=Expr(:tuple))
+    create_tracepoint!(__module__, __source__, category.value, kind.value, lib_id, args)
 end
 macro region_start(category::QuoteNode, args=Expr(:tuple))
-    create_tracepoint!(__module__, __source__, category.value, :start, args)
+    create_tracepoint!(__module__, __source__, category.value, :start, 0, args)
 end
-macro region_finish(category::QuoteNode, args=Expr(:tuple))
-    create_tracepoint!(__module__, __source__, category.value, :finish, args)
+macro region_finish(category::QuoteNode, lib_id, args=Expr(:tuple))
+    create_tracepoint!(__module__, __source__, category.value, :finish, lib_id, args)
 end
 
+"""
+    @region :category arg1 arg2... ex
+
+Constructs a pair of tracepoints around the execution of `ex`. The start
+tracepoint executes just before `ex`, and the finish tracepoint executes just
+after `ex`. The category for both tracepoints is `:category`, and must be a
+literal `Symbol` (as the tracepoints are constructed while `@region` is being
+parsed). The kind for each tracepoint is `:start` and `:finish` respectively
+(used when programming or enabling/disabling tracepoints).
+
+These tracepoints start out disabled and unprogrammed, and by default will do
+nothing (having negligible performance impact, if any). They can be programmed
+with [`set!`](@ref), and enabled with [`enable!`](@ref).
+
+Arguments may be provided in a few formats:
+
+`arg::T` - This specifies that the argument with name `arg` has type `T`, where
+`T` is a concrete type. In this form, `arg` must be a variable in scope that
+`@region` can read during start and finish tracepoint execution. If `arg` is
+modified during the execution of `ex`, its new value will be passed into the
+finish tracepoint.
+
+`arg::T=value` - This format is similar to `arg::T`, except that `arg` is not
+read from a variable with the same name, but is instead hard-coded as `value`
+for both start and finish tracepoints.
+
+`(start_arg::ST, finish_arg::FT)` - This format is like `arg::T`, except that
+it allows specifying different values for the start and finish tracepoints.
+"""
+macro region(category, _args...)
+    if !(category isa QuoteNode)
+        throw(ArgumentError("@region: category must be a literal `Symbol`"))
+    end
+    args = Expr(:tuple, _args[1:end-1]...)
+    ex = _args[end]
+    start_args, finish_args = parse_region_args(args)
+    @gensym lib_id
+    quote
+        $lib_id = $(create_tracepoint!(__module__, __source__, category.value, :start, 0, start_args))
+        try
+            $(esc(ex))
+        finally
+            $(create_tracepoint!(__module__, __source__, category.value, :finish, lib_id, finish_args))
+        end
+    end
+end
 function parse_region_args(args::Expr)
     start_args = Expr(:tuple)
     finish_args = Expr(:tuple)
@@ -253,19 +333,6 @@ function parse_region_args(args::Expr)
         end
     end
     return start_args, finish_args
-end
-macro region(category::QuoteNode, _args...)
-    args = Expr(:tuple, _args[1:end-1]...)
-    ex = _args[end]
-    start_args, finish_args = parse_region_args(args)
-    quote
-        $(create_tracepoint!(__module__, __source__, category.value, :start, start_args))
-        try
-            $(esc(ex))
-        finally
-            $(create_tracepoint!(__module__, __source__, category.value, :finish, finish_args))
-        end
-    end
 end
 
 end # module
