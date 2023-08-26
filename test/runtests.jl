@@ -1,6 +1,8 @@
 import ProbeBase
 using Test
 
+import Base: @invokelatest
+
 ctr = Threads.Atomic{Int}(1)
 
 function eval_new_mod(ex)

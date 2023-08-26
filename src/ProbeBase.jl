@@ -2,8 +2,6 @@ module ProbeBase
 
 using Preferences
 
-import Base: @invokelatest
-
 export @tracepoint, @region_start, @region_finish, @region
 
 const PROBES_ENABLED = parse(Bool, @load_preference("default_enabled", "false"))
