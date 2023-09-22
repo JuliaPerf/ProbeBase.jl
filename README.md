@@ -16,10 +16,10 @@ only supports a limited number of visualization and analysis backends, causing
 users to need to switch between multiple UI tools just to gain a full
 understanding of package behavior.
 
-Thankfully, with ProbeBase.jl, we now have powerful pure-Julia tools for
+Thankfully, with Tracepoints.jl, we now have powerful pure-Julia tools for
 introspecting package behavior and performance, without harming the performance
 of carefully-tuned package code, and with flexible support for many kinds of
-external pure-Julia and non-Julia backends. ProbeBase currently provides a
+external pure-Julia and non-Julia backends. Tracepoints currently provides a
 single powerful tool, the "tracepoint" (sometimes known as a "probe point"),
 which allows packages to expose interesting points of execution within their
 codebase to whatever observability tool the user prefers to use.
@@ -35,12 +35,12 @@ tracepoint event for later visualization and analysis.
 Let's see a simple example of defining a tracepoint. We have a function
 `do_work` which does two pieces of interesting work, and we want to know when
 `do_work` is running, and also when each piece of interesting work is running.
-We can use the `@region` macro, exported by ProbeBase, to expose this
+We can use the `@region` macro, exported by Tracepoints, to expose this
 information:
 
 ```julia
 module MyMod
-    import ProbeBase: @region
+    import Tracepoints: @region
     function do_work(x::String, y::Int)
         @region :do_work begin
             @region :do_first_piece x::String begin
@@ -59,7 +59,7 @@ end
 
 We can now say that `do_work` has been "instrumented" with tracepoints. Note
 that we wrap `do_work` in a module - tracepoints are registered at the module
-level, and most functions in ProbeBase expect a module to be provided. We also
+level, and most functions in Tracepoints expect a module to be provided. We also
 pass some arguments to our `@region` macros so that we can expose these values
 to our probe (which might be interested in their values).
 
@@ -70,14 +70,14 @@ the probe as a `NamedTuple`). We'll also program our tracepoints with this
 probe using `set!`:
 
 ```julia
-import ProbeBase
+import Tracepoints
 
 function simple_probe(category, kind, _, args)
     println("Probe triggered: category: $category, kind: $kind, arguments: $args")
     return 0
 end
 
-ProbeBase.set!(simple_probe, MyMod)
+Tracepoints.set!(simple_probe, MyMod)
 ```
 
 Our `simple_probe` is now attached to all of the tracepoints within `MyMod`,
@@ -85,7 +85,7 @@ although it's not yet enabled - let's do that now with `enable!`, and see what h
 call `do_work`:
 
 ```julia
-ProbeBase.enable!(MyMod)
+Tracepoints.enable!(MyMod)
 
 MyMod.do_work("abc", 123)
 
@@ -110,7 +110,7 @@ function like normal, without any of the overhead of running our `simple_probe`
 at tracepoints:
 
 ```julia
-ProbeBase.disable!(MyMod)
+Tracepoints.disable!(MyMod)
 
 MyMod.do_work("abc", 123)
 

@@ -1,4 +1,4 @@
-import ProbeBase
+import Tracepoints
 using Test
 
 import Base: @invokelatest
@@ -9,7 +9,7 @@ function eval_new_mod(ex)
     modname = Symbol("ProbedModule", Threads.atomic_add!(ctr, 1))
     eval(
         :(module $modname
-            using ProbeBase
+            using Tracepoints
 
             # Our instrumented function
             function myfunc(x::String, y::Int)
@@ -36,11 +36,11 @@ end
         valid && @test @invokelatest(mod.myfunc("test", 42)) == "testn43"
         @test length(vec) == 0
 
-        ProbeBase.set!(probe, mod)
+        Tracepoints.set!(probe, mod)
         valid && @test @invokelatest(mod.myfunc("test", 42)) == "testn43"
         @test length(vec) == 0
 
-        ProbeBase.enable!(mod)
+        Tracepoints.enable!(mod)
         if valid
             @test @invokelatest(mod.myfunc("test", 42)) == "testn43"
         else
@@ -52,7 +52,7 @@ end
         region_start = popfirst!(vec)
         region_finish = popfirst!(vec)
 
-        ProbeBase.disable!(mod)
+        Tracepoints.disable!(mod)
         valid && @test @invokelatest(mod.myfunc("test", 42)) == "testn43"
         @test length(vec) == 0
 
