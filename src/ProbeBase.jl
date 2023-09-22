@@ -37,8 +37,8 @@ This function only programs the probe that tracepoints with call, but does not
 enable those tracepoints; [`enable!`](@ref) must be called to cause the
 tracepoints to execute their probe function.
 
-Note that `f` will be rooted by ProbeBase until a future `set!` call sets a
-different probe payload.
+Note that if `f` is not a `Ptr{Cvoid}`, it will be rooted by ProbeBase until a
+future `set!` call sets a different probe payload.
 """
 function set! end
 
