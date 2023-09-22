@@ -36,6 +36,9 @@ unspecified, then all tracepoints in all loaded modules are programmed.
 This function only programs the probe that tracepoints with call, but does not
 enable those tracepoints; [`enable!`](@ref) must be called to cause the
 tracepoints to execute their probe function.
+
+Note that `f` will be rooted by ProbeBase until a future `set!` call sets a
+different probe payload.
 """
 function set! end
 
@@ -211,6 +214,7 @@ function register_probe(mod::Module, category::Symbol, kind::Symbol, spec::Trace
     if !isdefined(mod, :__probebase_lock__)
         mod_lock = mod.eval(:(__probebase_lock__ = Threads.ReentrantLock()))
         tracepoints = mod.eval(:(__probebase_tracepoints__ = Dict{Symbol,Dict{Symbol,$TracepointSpec}}()))
+        # Just for rooting of function objects
         funcs = mod.eval(:(__probebase_funcs__ = Dict{Symbol,Dict{Symbol,Any}}()))
     else
         mod_lock = mod.__probebase_lock__
