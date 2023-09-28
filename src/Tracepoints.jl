@@ -10,16 +10,31 @@ default_enabled(val::Bool) = @set_preferences!("default_enabled" => repr(val))
 
 abstract type AbstractPayload end
 
+@static if VERSION >= v"1.7-"
+    mutable struct ShareableSemaphore
+        @atomic value::Int
+    end
+else
+    mutable struct ShareableSemaphore
+        value::Threads.Atomic{Int}
+        ShareableSemaphore(value::Int) = new(Threads.Atomic{Int}(value))
+    end
+end
+
 struct TracepointSpec
     lineno::LineNumberNode
     argtypes::Vector{DataType}
     payload::Base.RefValue{Ptr{Cvoid}}
-    semaphore::Threads.Atomic{Int}
+    semaphore::ShareableSemaphore
 end
 TracepointSpec(lineno::LineNumberNode, argtypes::Vector, payload::Ptr{Cvoid}=C_NULL) =
     TracepointSpec(lineno, argtypes,
-              Ref(payload),
-              Threads.Atomic{Int}(PROBES_ENABLED))
+                   Ref(payload),
+                   ShareableSemaphore(PROBES_ENABLED))
+TracepointSpec(lineno::LineNumberNode, argtypes::Vector, payload::Base.RefValue{Int}, semaphore::ShareableSemaphore) =
+    TracepointSpec(lineno, argtypes,
+                   payload,
+                   semaphore)
 
 """
     set!(f)
@@ -115,7 +130,7 @@ function set!(f, mod::Module, category::Symbol)
         tracepoints[category]
     end
     for (kind, spec) in specs
-        ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Any))))
+        ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Symbol, Any))))
         lock(mod_lock) do
             tracepoints[category][kind].payload[] = ptr
             funcs[category][kind] = f
@@ -129,7 +144,7 @@ function set!(f, mod::Module, category::Symbol, kind::Symbol)
     spec = lock(mod_lock) do
         tracepoints[category][kind]
     end
-    ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Any))))
+    ptr = eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Symbol, Any))))
     lock(mod_lock) do
         tracepoints[category][kind].payload[] = ptr
         funcs[category][kind] = f
@@ -142,7 +157,7 @@ function enable!(mod::Module)
     lock(mod_lock) do
         for spec_dict in values(tracepoints)
             for spec in values(spec_dict)
-                Threads.atomic_add!(spec.semaphore, 1)
+                adjust_semaphore!(spec.semaphore, 1)
             end
         end
     end
@@ -153,7 +168,7 @@ function disable!(mod::Module)
     lock(mod_lock) do
         for spec_dict in values(tracepoints)
             for spec in values(spec_dict)
-                Threads.atomic_sub!(spec.semaphore, 1)
+                adjust_semaphore!(spec.semaphore, -1)
             end
         end
     end
@@ -163,7 +178,7 @@ function enable!(mod::Module, category::Symbol)
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
         for spec in values(tracepoints[category])
-            Threads.atomic_add!(spec.semaphore, 1)
+            adjust_semaphore!(spec.semaphore, 1)
         end
     end
 end
@@ -172,7 +187,7 @@ function disable!(mod::Module, category::Symbol)
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
         for spec in values(tracepoints[category])
-            Threads.atomic_sub!(spec.semaphore, 1)
+            adjust_semaphore!(spec.semaphore, -1)
         end
     end
 end
@@ -180,37 +195,56 @@ function enable!(mod::Module, category::Symbol, kind::Symbol)
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
-        Threads.atomic_add!(tracepoints[category][kind].semaphore, 1)
+        adjust_semaphore!(tracepoints[category][kind].semaphore, 1)
     end
 end
 function disable!(mod::Module, category::Symbol, kind::Symbol)
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
-        Threads.atomic_sub!(tracepoints[category][kind].semaphore, 1)
+        adjust_semaphore!(tracepoints[category][kind].semaphore, -1)
     end
 end
 
-probe_enabled(spec::TracepointSpec) = spec.semaphore[] > 0
-function probe_maybe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, args...)
-    if probe_enabled(spec)
-        probe_trigger(spec, category, kind, lib_id, args...)
+@static if VERSION >= v"1.7-"
+    function adjust_semaphore!(semaphore::ShareableSemaphore, adj::Int)
+        @atomic semaphore.value += adj
+    end
+    function probe_enabled(spec::TracepointSpec)
+        semaphore = spec.semaphore
+        return (@atomic semaphore.value) > 0
+    end
+else
+    function adjust_semaphore!(semaphore::ShareableSemaphore, adj::Int)
+        Threads.atomic_add!(semaphore.value, adj)
+    end
+    probe_enabled(spec::TracepointSpec) = spec.semaphore.value[] > 0
+end
+function probe_maybe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, abi_type, arg)
+    if probe_enabled(spec) && spec.payload[] != C_NULL
+        probe_trigger(spec, category, kind, lib_id, abi_type, arg)
     end
 end
-@generated function probe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, arg)
-    Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Any)
+@generated function probe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, ::Val{abi_type}, arg) where {abi_type}
+    if abi_type != :Nothing
+        Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Symbol, abi_type)
+    else
+        Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Symbol, :Any)
+    end
     ex = Expr(:call, :ccall, :(spec.payload[]), :Int64, Targs)
     push!(ex.args, :(category))
     push!(ex.args, :(kind))
     push!(ex.args, :(lib_id))
-    push!(ex.args, :(arg))
+    push!(ex.args, QuoteNode(abi_type))
+    if abi_type != :Nothing
+        push!(ex.args, :(arg))
+    else
+        push!(ex.args, :(nothing))
+    end
     return ex
 end
 
-function register_probe(mod::Module, category::Symbol, kind::Symbol, spec::TracepointSpec; enable=false)
-    if enable
-        spec.semaphore[] = 1
-    end
+function register_probe(mod::Module, category::Symbol, kind::Symbol, spec::TracepointSpec)
     if !isdefined(mod, :__tracepoints_lock__)
         mod_lock = mod.eval(:(__tracepoints_lock__ = Threads.ReentrantLock()))
         tracepoints = mod.eval(:(__tracepoints_specs__ = Dict{Symbol,Dict{Symbol,$TracepointSpec}}()))
@@ -256,20 +290,62 @@ function parse_args(mod::Module, args)
     end
     (;argnames, argtypes, argvalues)
 end
-function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol, lib_id, args::Expr)
+function determine_abi(argtypes)
+    primitives = (UInt8, UInt16, UInt32, UInt64,
+                  Int8, Int16, Int32, Int64,
+                  Float16, Float32, Float64,
+                  Symbol, String)
+    if length(argtypes) == 0
+        return :Nothing
+    elseif length(argtypes) == 1 && only(argtypes) in primitives
+        return nameof(only(argtypes))
+    end
+    return :Any
+end
+function wrap_tracepoint_args(argspec)
+    abi_type = determine_abi(argspec.argtypes)
+    if abi_type == :Any
+        T_nt = NamedTuple{(argspec.argnames...,), Tuple{argspec.argtypes...,}}
+        args_ex = Expr(:tuple, argspec.argvalues...)
+        args_box = :($T_nt($args_ex))
+    elseif abi_type == :Nothing
+        args_box = :()
+    else
+        args_box = only(argspec.argvalues)
+    end
+    return (abi_type, args_box)
+end
+function create_tracepoint_spec(source, argspec, args::Expr; alias_with=nothing)
+    if alias_with === nothing
+        return TracepointSpec(source, argspec.argtypes)
+    else
+        return TracepointSpec(source, argspec.argtypes,
+                              alias_with.payload, alias_with.semaphore)
+    end
+end
+function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol, lib_id, args::Expr; alias_with=nothing)
     argspec = parse_args(mod, args)
-    spec = TracepointSpec(source, argspec.argtypes)
+    spec = create_tracepoint_spec(source, argspec, args; alias_with)
     register_probe(mod, category, kind, spec)
-    T_nt = NamedTuple{(argspec.argnames...,), Tuple{argspec.argtypes...,}}
-    args_box = Ref{T_nt}()
-    args_ex = Expr(:tuple, argspec.argvalues...)
+    return create_tracepoint_call(category, kind, lib_id, argspec, spec)
+end
+# Semaphore and probe payload not yet loaded
+function create_tracepoint_call(category, kind, lib_id, argspec, spec)
+    abi_type, args_box = wrap_tracepoint_args(argspec)
     return quote
-        if $probe_enabled($spec)
-            $args_box[] = $T_nt($args_ex)
-            $probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), $lib_id, $args_box)
+        $probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), $lib_id, $(Val{abi_type}()), $args_box)
+    end
+end
+# Semaphore and probe payload already loaded
+function create_tracepoint_call_loaded(category, kind, lib_id, argspec, spec, sema_set, payload)
+    abi_type, args_box = wrap_tracepoint_args(argspec)
+    return quote
+        if $sema_set && $payload != C_NULL
+            $probe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), $lib_id, $(Val{abi_type}()), $args_box)
         end
     end
 end
+
 macro tracepoint(kind::QuoteNode, category::QuoteNode, lib_id, args=Expr(:tuple))
     create_tracepoint!(__module__, __source__, category.value, kind.value, lib_id, args)
 end
@@ -313,16 +389,26 @@ macro region(category, _args...)
     if !(category isa QuoteNode)
         throw(ArgumentError("@region: category must be a literal `Symbol`"))
     end
+    category = category.value
     args = Expr(:tuple, _args[1:end-1]...)
     ex = _args[end]
     start_args, finish_args = parse_region_args(args)
 
-    @gensym lib_id
-    start_tp = create_tracepoint!(__module__, __source__, category.value, :start, 0, start_args)
-    finish_tp = create_tracepoint!(__module__, __source__, category.value, :finish, lib_id, finish_args)
+    @gensym lib_id sema_set payload
+
+    start_argspec = parse_args(__module__, start_args)
+    start_spec = create_tracepoint_spec(__source__, start_argspec, start_args)
+    register_probe(__module__, category, :start, start_spec)
+    start_tp = create_tracepoint_call_loaded(category, :start, 0, start_argspec, start_spec, sema_set, payload)
+
+    finish_argspec = parse_args(__module__, finish_args)
+    finish_spec = create_tracepoint_spec(__source__, finish_argspec, finish_args; alias_with=start_spec)
+    register_probe(__module__, category, :finish, finish_spec)
+    finish_tp = create_tracepoint_call_loaded(category, :finish, lib_id, finish_argspec, finish_spec, sema_set, payload)
 
     quote
-        # FIXME: Load semaphore and probe
+        $sema_set = $probe_enabled($start_spec)
+        $payload = $start_spec.payload[]
         $lib_id = $start_tp
         try
             $(esc(ex))

@@ -20,8 +20,8 @@ function eval_new_mod(ex)
 end
 
 const vec = []
-function probe(category::Symbol, kind::Symbol, lib_id::Int, args::NamedTuple)
-    push!(vec, (category, kind, lib_id, args))
+function probe(category::Symbol, kind::Symbol, lib_id::Int, abi_type::Symbol, args)
+    push!(vec, (category, kind, lib_id, abi_type, args))
     return lib_id + 1
 end
 
@@ -56,10 +56,32 @@ end
         valid && @test @invokelatest(mod.myfunc("test", 42)) == "testn43"
         @test length(vec) == 0
 
-        cat, kind, lib_id, args = region_start
+        cat, kind, lib_id, abi_type, args = region_start
         @test cat == :test
         @test kind == :start
         @test lib_id == 0
+        function test_abi(args, abi_type, with_x, with_y)
+            if with_x && with_y
+                @test abi_type == :Any
+                @test args isa NamedTuple
+                return args
+            elseif !with_x && !with_y
+                @test abi_type == :Nothing
+                @test args === nothing
+                return NamedTuple()
+            else
+                if with_x
+                    @test abi_type == :String
+                    @test args isa String
+                    return (;x=args)
+                else
+                    @test abi_type == nameof(Int)
+                    @test args isa Int
+                    return (;y=args)
+                end
+            end
+        end
+        new_args = test_abi(args, abi_type, with_x, with_y)
         function test_args_fields(args, flip, with_x, with_y, x_exp, y_exp)
             exp = []
             if with_x
@@ -83,15 +105,16 @@ end
                 end
             end
         end
-        test_args_fields(args, flip, with_x, with_y,
+        test_args_fields(new_args, flip, with_x, with_y,
                          something(x_all, x_pre),
                          something(y_all, y_pre))
 
-        cat, kind, lib_id, args = region_finish
+        cat, kind, lib_id, abi_type, args = region_finish
         @test cat == :test
         @test kind == :finish
         @test lib_id == 1
-        test_args_fields(args, flip, with_x, with_y,
+        new_args = test_abi(args, abi_type, with_x, with_y)
+        test_args_fields(new_args, flip, with_x, with_y,
                          something(x_all, x_pre * 'n'),
                          something(y_all, y_pre + 1))
     end
