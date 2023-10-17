@@ -37,10 +37,10 @@ TracepointSpec(lineno::LineNumberNode, argtypes::Vector, payload::Base.RefValue{
                    semaphore)
 
 """
-    set!(f)
-    set!(f, mod::Module)
-    set!(f, mod::Module, category::Symbol)
-    set!(f, mod::Module, category::Symbol, kind::Symbol)
+    set!(f; kwargs...)
+    set!(f, mod::Module; kwargs...)
+    set!(f, mod::Module, category::Symbol; kwargs...)
+    set!(f, mod::Module, category::Symbol, kind::Symbol; kwargs...)
 
 Sets the probe payload for one or more tracepoints to `f`, which may either be
 a function, or a pointer to a function. If `kind` is unspecified, then all
@@ -48,9 +48,19 @@ tracepoints with category `category` are programmed; if `category` is also
 unspecified, then all tracepoints in `mod` are programmed. If `mod` is
 unspecified, then all tracepoints in all loaded modules are programmed.
 
-This function only programs the probe that tracepoints with call, but does not
+This function only programs the probe that tracepoints will call, but does not
 enable those tracepoints; [`enable!`](@ref) must be called to cause the
 tracepoints to execute their probe function.
+
+If `f` is a `Ptr{Cvoid}`, an `abi` keyword argument must be passed to
+communicate which ABI (`:fast`, `:slow`, or `:all` for both) the probe expects.
+By default, any tracepoints with an incompatible ABI will generate a warning
+and will be skipped. It's possible to change this behavior with the
+`incompatible` keyword argument, which defaults to `:warn` but can also be set
+to `:skip` (to quietly skip incompatible tracepoints) or `:error` (to throw an
+error on incompatible tracepoints). Note that when `f` is a Julia function,
+`abi` defaults to `:all`, although this can be changed to target only certain
+ABIs.
 
 Note that if `f` is not a `Ptr{Cvoid}`, it will be rooted until a future `set!`
 call sets a different probe payload.
@@ -91,38 +101,41 @@ undo a call to `disable!`.
 """
 function disable! end
 
-function set!(f::Union{Base.Callable, Ptr{Cvoid}})
+function set!(f::Union{Base.Callable, Ptr{Cvoid}}; kwargs...)
     for mod in values(Base.loaded_modules)
         if isdefined(mod, :__tracepoints_lock__)
-            set!(f, mod)
+            set!(f, mod; kwargs...)
         end
     end
 end
-function set!(f::Union{Base.Callable, Ptr{Cvoid}}, mod::Module)
+function set!(f::Union{Base.Callable, Ptr{Cvoid}}, mod::Module; kwargs...)
     categories = lock(mod.__tracepoints_lock__) do
         collect(keys(mod.__tracepoints_specs__))
     end
     for category in categories
-        set!(f, mod, category)
+        set!(f, mod, category; kwargs...)
     end
 end
-function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol)
+function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol; abi::Symbol, incompatible::Symbol=:warn)
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
         for spec in values(tracepoints[category])
+            validate_abi(spec, abi, incompatible) || continue
             spec.payload[] = payload
         end
     end
 end
-function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol, kind::Symbol)
+function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol, kind::Symbol; abi::Symbol, incompatible::Symbol=:warn)
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
-        tracepoints[category][kind].payload[] = payload
+        spec = tracepoints[category][kind]
+        validate_abi(spec, abi, incompatible) || return
+        spec.payload[] = payload
     end
 end
-function set!(f, mod::Module, category::Symbol)
+function set!(f, mod::Module, category::Symbol; abi::Symbol=:all, incompatible::Symbol=:warn)
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     funcs = mod.__tracepoints_funcs__
@@ -130,6 +143,7 @@ function set!(f, mod::Module, category::Symbol)
         tracepoints[category]
     end
     for (kind, spec) in specs
+        validate_abi(spec, abi, incompatible) || continue
         ptr = generate_probe_fptr(f, spec)
         lock(mod_lock) do
             spec.payload[] = ptr
@@ -137,18 +151,39 @@ function set!(f, mod::Module, category::Symbol)
         end
     end
 end
-function set!(f, mod::Module, category::Symbol, kind::Symbol)
+function set!(f, mod::Module, category::Symbol, kind::Symbol; abi::Symbol=:all, incompatible::Symbol=:warn)
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     funcs = mod.__tracepoints_funcs__
     spec = lock(mod_lock) do
         tracepoints[category][kind]
     end
+    validate_abi(spec, abi, incompatible) || return
     ptr = generate_probe_fptr(f, spec)
     lock(mod_lock) do
         spec.payload[] = ptr
         funcs[category][kind] = f
     end
+end
+function validate_abi(spec::TracepointSpec, abi::Symbol, incompatible::Symbol)
+    if !(abi in (:fast, :slow, :all))
+        throw(ArgumentError("Invalid value for `abi`: $abi (must be one of: `:slow`, `:fast`, `:all`)"))
+    end
+    spec_abi = determine_abi(spec)
+    spec_abi_sym = spec_abi == :Any ? :slow : :fast
+    if abi != :all && spec_abi_sym != abi
+        if incompatible == :skip
+            return false
+        elseif incompatible == :warn
+            @warn "Skipping incompatible ABI for tracepoint: probe ABI is $abi while tracepoint ABI is $spec_abi_sym"
+            return false
+        elseif incompatible == :error
+            throw(ArgumentError("Incompatible ABI for tracepoint: probe ABI is $abi while tracepoint ABI is $spec_abi_sym"))
+        else
+            throw(ArgumentError("Invalid value for `incompatible`: $incompatible (must be one of: `:skip`, `:warn`, `:error`)"))
+        end
+    end
+    return true
 end
 function generate_probe_fptr(@nospecialize(f), spec)
     abi_type = determine_abi(spec.argtypes)
@@ -326,6 +361,7 @@ function determine_abi(argtypes)
     end
     return :Any
 end
+determine_abi(spec::TracepointSpec) = determine_abi(spec.argtypes)
 function wrap_tracepoint_args(argspec)
     abi_type = determine_abi(argspec.argtypes)
     arg_name = :NONAME
