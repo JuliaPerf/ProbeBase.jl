@@ -103,20 +103,22 @@ function disable! end
 
 function set!(f::Union{Base.Callable, Ptr{Cvoid}}; kwargs...)
     for mod in values(Base.loaded_modules)
-        if isdefined(mod, :__tracepoints_lock__)
-            set!(f, mod; kwargs...)
-        end
+        isdefined(mod, :__tracepoints_lock__) || continue
+        set!(f, mod; kwargs...)
     end
 end
 function set!(f::Union{Base.Callable, Ptr{Cvoid}}, mod::Module; kwargs...)
+    isdefined(mod, :__tracepoints_lock__) || return
     categories = lock(mod.__tracepoints_lock__) do
         collect(keys(mod.__tracepoints_specs__))
     end
     for category in categories
         set!(f, mod, category; kwargs...)
     end
+    _recurse2(set!, f, mod; kwargs...)
 end
 function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol; abi::Symbol, incompatible::Symbol=:warn)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
@@ -125,8 +127,10 @@ function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol; abi::Symbol, i
             spec.payload[] = payload
         end
     end
+    _recurse2(set!, payload, mod, category; abi, incompatible)
 end
 function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol, kind::Symbol; abi::Symbol, incompatible::Symbol=:warn)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
@@ -134,8 +138,10 @@ function set!(payload::Ptr{Cvoid}, mod::Module, category::Symbol, kind::Symbol; 
         validate_abi(spec, abi, incompatible) || return
         spec.payload[] = payload
     end
+    _recurse2(set!, payload, mod, category, kind; abi, incompatible)
 end
 function set!(f, mod::Module, category::Symbol; abi::Symbol=:all, incompatible::Symbol=:warn)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     funcs = mod.__tracepoints_funcs__
@@ -150,8 +156,10 @@ function set!(f, mod::Module, category::Symbol; abi::Symbol=:all, incompatible::
             funcs[category][kind] = f
         end
     end
+    _recurse2(set!, f, mod, category; abi, incompatible)
 end
 function set!(f, mod::Module, category::Symbol, kind::Symbol; abi::Symbol=:all, incompatible::Symbol=:warn)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     funcs = mod.__tracepoints_funcs__
@@ -164,6 +172,7 @@ function set!(f, mod::Module, category::Symbol, kind::Symbol; abi::Symbol=:all, 
         spec.payload[] = ptr
         funcs[category][kind] = f
     end
+    _recurse2(set!, f, mod, category, kind; abi, incompatible)
 end
 function validate_abi(spec::TracepointSpec, abi::Symbol, incompatible::Symbol)
     if !(abi in (:fast, :slow, :all))
@@ -202,6 +211,7 @@ function generate_probe_fptr(@nospecialize(f), spec)
 end
 
 function enable!(mod::Module)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
@@ -211,8 +221,10 @@ function enable!(mod::Module)
             end
         end
     end
+    _recurse1(enable!, mod)
 end
 function disable!(mod::Module)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
@@ -222,8 +234,10 @@ function disable!(mod::Module)
             end
         end
     end
+    _recurse1(disable!, mod)
 end
 function enable!(mod::Module, category::Symbol)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
@@ -231,8 +245,10 @@ function enable!(mod::Module, category::Symbol)
             adjust_semaphore!(spec.semaphore, 1)
         end
     end
+    _recurse1(enable!, mod, category)
 end
 function disable!(mod::Module, category::Symbol)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
@@ -240,19 +256,43 @@ function disable!(mod::Module, category::Symbol)
             adjust_semaphore!(spec.semaphore, -1)
         end
     end
+    _recurse1(disable!, mod, category)
 end
 function enable!(mod::Module, category::Symbol, kind::Symbol)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
         adjust_semaphore!(tracepoints[category][kind].semaphore, 1)
     end
+    _recurse1(enable!, mod, category, kind)
 end
 function disable!(mod::Module, category::Symbol, kind::Symbol)
+    isdefined(mod, :__tracepoints_lock__) || return
     mod_lock = mod.__tracepoints_lock__
     tracepoints = mod.__tracepoints_specs__
     lock(mod_lock) do
         adjust_semaphore!(tracepoints[category][kind].semaphore, -1)
+    end
+    _recurse1(disable!, mod, category, kind)
+end
+
+function _recurse1(f, mod, args...; kwargs...)
+    for name in names(mod; all=true)
+        isdefined(mod, name) || continue
+        obj = getproperty(mod, name)
+        if obj isa Module && obj !== mod
+            f(obj, args...; kwargs...)
+        end
+    end
+end
+function _recurse2(f, arg1, mod, args...; kwargs...)
+    for name in names(mod; all=true)
+        isdefined(mod, name) || continue
+        obj = getproperty(mod, name)
+        if obj isa Module && obj !== mod
+            f(arg1, obj, args...; kwargs...)
+        end
     end
 end
 
