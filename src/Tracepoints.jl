@@ -377,11 +377,11 @@ function parse_args(mod::Module, args)
         if Meta.isexpr(arg, :(=))
             push!(argnames, arg.args[1].args[1])
             push!(argtypes, mod.eval(arg.args[1].args[2]))
-            push!(argvalues, esc(arg.args[2]))
+            push!(argvalues, arg.args[2])
         elseif Meta.isexpr(arg, :(::))
             push!(argnames, arg.args[1])
             push!(argtypes, mod.eval(arg.args[2]))
-            push!(argvalues, esc(arg.args[1]))
+            push!(argvalues, arg.args[1])
         elseif arg isa Expr
             throw(ArgumentError("Tracepoint argument unsupported: `Expr` with head: $(arg.head)"))
         elseif arg isa Symbol
@@ -451,14 +451,17 @@ function create_tracepoint_call_loaded(modname, category, kind, lib_id, argspec,
     end
 end
 
-macro tracepoint(kind::QuoteNode, category::QuoteNode, lib_id, args=Expr(:tuple))
-    create_tracepoint!(__module__, __source__, category.value, kind.value, lib_id, args)
+macro tracepoint(kind::QuoteNode, category::QuoteNode, lib_id, args...)
+    args = Expr(:tuple, args...)
+    esc(create_tracepoint!(__module__, __source__, category.value, kind.value, lib_id, args))
 end
-macro region_start(category::QuoteNode, args=Expr(:tuple))
-    create_tracepoint!(__module__, __source__, category.value, :start, 0, args)
+macro region_start(category::QuoteNode, args...)
+    args = Expr(:tuple, args...)
+    esc(create_tracepoint!(__module__, __source__, category.value, :start, 0, args))
 end
-macro region_finish(category::QuoteNode, lib_id, args=Expr(:tuple))
-    create_tracepoint!(__module__, __source__, category.value, :finish, lib_id, args)
+macro region_finish(category::QuoteNode, lib_id, args...)
+    args = Expr(:tuple, args...)
+    esc(create_tracepoint!(__module__, __source__, category.value, :finish, lib_id, args))
 end
 
 """
@@ -490,13 +493,18 @@ for both start and finish tracepoints.
 `(start_arg::ST, finish_arg::FT)` - This format is like `arg::T`, except that
 it allows specifying different values for the start and finish tracepoints.
 """
-macro region(category, _args...)
-    if !(category isa QuoteNode)
-        throw(ArgumentError("@region: category must be a literal `Symbol`"))
+macro region(all_args...)
+    fn_rewrap = Meta.isexpr(last(all_args), :function)
+    if first(all_args) isa QuoteNode
+        category, all_args... = all_args
+        category = category.value
+    elseif fn_rewrap
+        category = last(all_args).args[1].args[1]::Symbol
+    else
+        throw(ArgumentError("@region: category must be a literal `Symbol` passed as the first argument, or `@region` must wrap a `function` definition"))
     end
-    category = category.value
-    args = Expr(:tuple, _args[1:end-1]...)
-    ex = _args[end]
+    ex = last(all_args)
+    args = Expr(:tuple, all_args[1:end-1]...)
     start_args, finish_args = parse_region_args(args)
 
     @gensym lib_id sema_set payload
@@ -511,15 +519,21 @@ macro region(category, _args...)
     register_probe(__module__, category, :finish, finish_spec)
     finish_tp = create_tracepoint_call_loaded(repr(__module__), category, :finish, lib_id, finish_argspec, finish_spec, sema_set, payload)
 
-    quote
-        $sema_set = $probe_enabled($start_spec)
-        $payload = $start_spec.payload[]
-        $lib_id = $start_tp
-        try
-            $(esc(ex))
-        finally
-            $finish_tp
+    if fn_rewrap
+        ex.args[2] = quote
+            $sema_set = $probe_enabled($start_spec)
+            $payload = $start_spec.payload[]
+            $lib_id = $start_tp
+            $(Expr(:tryfinally, ex.args[2], finish_tp))
         end
+        return esc(ex)
+    else
+        return esc(quote
+            $sema_set = $probe_enabled($start_spec)
+            $payload = $start_spec.payload[]
+            $lib_id = $start_tp
+            $(Expr(:tryfinally, ex, finish_tp))
+        end)
     end
 end
 function parse_region_args(args::Expr)
