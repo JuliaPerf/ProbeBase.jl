@@ -199,14 +199,14 @@ function generate_probe_fptr(@nospecialize(f), spec)
     if abi_type != :Any
         # Fast ABIs
         if abi_type == :Nothing
-            return eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Symbol, Int))))
+            return eval(:(@cfunction($f, Int64, (String, Symbol, Symbol, Int64, Symbol, Int))))
         else
             # Null ABI
-            return eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Symbol, $abi_type, Symbol))))
+            return eval(:(@cfunction($f, Int64, (String, Symbol, Symbol, Int64, Symbol, $abi_type, Symbol))))
         end
     else
         # Slow ABI
-        return eval(:(@cfunction($f, Int64, (Symbol, Symbol, Int64, Symbol, Any))))
+        return eval(:(@cfunction($f, Int64, (String, Symbol, Symbol, Int64, Symbol, Any))))
     end
 end
 
@@ -310,22 +310,25 @@ else
     end
     probe_enabled(spec::TracepointSpec) = spec.semaphore.value[] > 0
 end
-function probe_maybe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, abi_type, arg, name)
+function probe_maybe_trigger(spec::TracepointSpec, modname::String, category::Symbol, kind::Symbol, lib_id::Int64, abi_type, arg, name)
     if probe_enabled(spec) && spec.payload[] != C_NULL
-        probe_trigger(spec, category, kind, lib_id, abi_type, arg, name)
+        probe_trigger(spec, modname, category, kind, lib_id, abi_type, arg, name)
+    else
+        return 0
     end
 end
-@generated function probe_trigger(spec::TracepointSpec, category::Symbol, kind::Symbol, lib_id::Int64, ::Val{abi_type}, arg, name) where {abi_type}
+@generated function probe_trigger(spec::TracepointSpec, modname::String, category::Symbol, kind::Symbol, lib_id::Int64, ::Val{abi_type}, arg, name) where {abi_type}
     if abi_type != :Any
         if abi_type == :Nothing
-            Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Symbol, :Int)
+            Targs = Expr(:tuple, :String, :Symbol, :Symbol, :Int64, :Symbol, :Int)
         else
-            Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Symbol, abi_type, :Symbol)
+            Targs = Expr(:tuple, :String, :Symbol, :Symbol, :Int64, :Symbol, abi_type, :Symbol)
         end
     else
-        Targs = Expr(:tuple, :Symbol, :Symbol, :Int64, :Symbol, :Any)
+        Targs = Expr(:tuple, :String, :Symbol, :Symbol, :Int64, :Symbol, :Any)
     end
     ex = Expr(:call, :ccall, :(spec.payload[]), :Int64, Targs)
+    push!(ex.args, :(modname))
     push!(ex.args, :(category))
     push!(ex.args, :(kind))
     push!(ex.args, :(lib_id))
@@ -429,21 +432,21 @@ function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol,
     argspec = parse_args(mod, args)
     spec = create_tracepoint_spec(source, argspec, args; alias_with)
     register_probe(mod, category, kind, spec)
-    return create_tracepoint_call(category, kind, lib_id, argspec, spec)
+    return create_tracepoint_call(repr(mod), category, kind, lib_id, argspec, spec)
 end
 # Semaphore and probe payload not yet loaded
-function create_tracepoint_call(category, kind, lib_id, argspec, spec)
+function create_tracepoint_call(modname, category, kind, lib_id, argspec, spec)
     abi_type, args_box, arg_name = wrap_tracepoint_args(argspec)
     return quote
-        $probe_maybe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), $lib_id, $(Val{abi_type}()), $args_box, $(QuoteNode(arg_name)))
+        $probe_maybe_trigger($spec, $(QuoteNode(modname)), $(QuoteNode(category)), $(QuoteNode(kind)), $lib_id, $(Val{abi_type}()), $args_box, $(QuoteNode(arg_name)))
     end
 end
 # Semaphore and probe payload already loaded
-function create_tracepoint_call_loaded(category, kind, lib_id, argspec, spec, sema_set, payload)
+function create_tracepoint_call_loaded(modname, category, kind, lib_id, argspec, spec, sema_set, payload)
     abi_type, args_box, arg_name = wrap_tracepoint_args(argspec)
     return quote
         if $sema_set && $payload != C_NULL
-            $probe_trigger($spec, $(QuoteNode(category)), $(QuoteNode(kind)), $lib_id, $(Val{abi_type}()), $args_box, $(QuoteNode(arg_name)))
+            $probe_trigger($spec, $(QuoteNode(modname)), $(QuoteNode(category)), $(QuoteNode(kind)), $lib_id, $(Val{abi_type}()), $args_box, $(QuoteNode(arg_name)))
         end
     end
 end
@@ -501,12 +504,12 @@ macro region(category, _args...)
     start_argspec = parse_args(__module__, start_args)
     start_spec = create_tracepoint_spec(__source__, start_argspec, start_args)
     register_probe(__module__, category, :start, start_spec)
-    start_tp = create_tracepoint_call_loaded(category, :start, 0, start_argspec, start_spec, sema_set, payload)
+    start_tp = create_tracepoint_call_loaded(repr(__module__), category, :start, 0, start_argspec, start_spec, sema_set, payload)
 
     finish_argspec = parse_args(__module__, finish_args)
     finish_spec = create_tracepoint_spec(__source__, finish_argspec, finish_args; alias_with=start_spec)
     register_probe(__module__, category, :finish, finish_spec)
-    finish_tp = create_tracepoint_call_loaded(category, :finish, lib_id, finish_argspec, finish_spec, sema_set, payload)
+    finish_tp = create_tracepoint_call_loaded(repr(__module__), category, :finish, lib_id, finish_argspec, finish_spec, sema_set, payload)
 
     quote
         $sema_set = $probe_enabled($start_spec)
