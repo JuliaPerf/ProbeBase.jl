@@ -317,7 +317,7 @@ function probe_maybe_trigger(spec::TracepointSpec, modname::String, category::Sy
         return 0
     end
 end
-@generated function probe_trigger(spec::TracepointSpec, modname::String, category::Symbol, kind::Symbol, lib_id::Int64, ::Val{abi_type}, arg, name) where {abi_type}
+@generated function probe_trigger(spec::TracepointSpec, modname::String, category::Symbol, kind::Symbol, lib_id::Int64, ::Val{abi_type}, arg::abi_type, name::Symbol) where {abi_type}
     if abi_type != :Any
         if abi_type == :Nothing
             Targs = Expr(:tuple, :String, :Symbol, :Symbol, :Int64, :Symbol, :Int)
