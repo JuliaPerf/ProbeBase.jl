@@ -23,7 +23,7 @@ end
 
 struct TracepointSpec
     lineno::LineNumberNode
-    argtypes::Vector{DataType}
+    argtypes::Vector{Type}
     payload::Base.RefValue{Ptr{Cvoid}}
     semaphore::ShareableSemaphore
 end
@@ -328,8 +328,8 @@ function register_probe(mod::Module, category::Symbol, kind::Symbol, spec::Trace
 end
 function parse_args(mod::Module, args)
     argnames = Symbol[]
-    argtypes = DataType[]
-    argvalues = Expr[]
+    argtypes = Type[]
+    argvalues = []
     for arg in args.args
         if Meta.isexpr(arg, :(=))
             push!(argnames, arg.args[1].args[1])
