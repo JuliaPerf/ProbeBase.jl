@@ -390,7 +390,7 @@ function wrap_tracepoint_args(argspec)
         args_ex = Expr(:tuple, argspec.argvalues...)
         args_box = :($T_nt($args_ex))
     elseif abi_type == :Nothing
-        args_box = :()
+        args_box = :(nothing)
     else
         args_box = only(argspec.argvalues)
         arg_name = only(argspec.argnames)
