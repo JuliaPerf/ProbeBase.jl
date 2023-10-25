@@ -346,29 +346,6 @@ end
     return ex
 end
 
-function register_probe(mod::Module, category::Symbol, kind::Symbol, spec::TracepointSpec)
-    if !isdefined(mod, :__tracepoints_lock__)
-        mod_lock = mod.eval(:(__tracepoints_lock__ = Threads.ReentrantLock()))
-        tracepoints = mod.eval(:(__tracepoints_specs__ = Dict{Symbol,Dict{Symbol,$TracepointSpec}}()))
-        # Just for rooting of function objects
-        funcs = mod.eval(:(__tracepoints_funcs__ = Dict{Symbol,Dict{Symbol,Any}}()))
-    else
-        mod_lock = mod.__tracepoints_lock__
-        tracepoints = mod.__tracepoints_specs__
-        funcs = mod.__tracepoints_funcs__
-    end
-    lock(mod_lock) do
-        module_cat_specs = get!(tracepoints, category) do
-            Dict{Symbol,TracepointSpec}()
-        end
-        module_cat_specs[kind] = spec
-
-        module_cat_funcs = get!(funcs, category) do
-            Dict{Symbol,TracepointSpec}()
-        end
-        module_cat_funcs[kind] = nothing
-    end
-end
 function parse_args(mod::Module, args)
     argnames = Symbol[]
     argtypes = Type[]
@@ -420,18 +397,53 @@ function wrap_tracepoint_args(argspec)
     end
     return (abi_type, args_box, arg_name)
 end
-function create_tracepoint_spec(source, argspec, args::Expr; alias_with=nothing)
-    if alias_with === nothing
-        return TracepointSpec(source, argspec.argtypes)
+function create_tracepoint_spec(mod, source, category, kind, argspec, args::Expr; alias_with=nothing)
+    if !isdefined(mod, :__tracepoints_lock__)
+        mod_lock = mod.eval(:(__tracepoints_lock__ = Threads.ReentrantLock()))
+        tracepoints = mod.eval(:(__tracepoints_specs__ = Dict{Symbol,Dict{Symbol,$TracepointSpec}}()))
+        # Just for rooting of function objects
+        funcs = mod.eval(:(__tracepoints_funcs__ = Dict{Symbol,Dict{Symbol,Any}}()))
     else
-        return TracepointSpec(source, argspec.argtypes,
+        mod_lock = mod.__tracepoints_lock__
+        tracepoints = mod.__tracepoints_specs__
+        funcs = mod.__tracepoints_funcs__
+    end
+
+    # Check for existing spec
+    spec = lock(mod_lock) do
+        tp_cat = get(tracepoints, category, nothing)
+        tp_cat !== nothing || return nothing
+        return get(tp_cat, kind, nothing)
+    end
+    if spec !== nothing
+        # TODO: Register source
+        return spec
+    end
+
+    # Create new spec
+    if alias_with === nothing
+        spec = TracepointSpec(source, argspec.argtypes)
+    else
+        spec = TracepointSpec(source, argspec.argtypes,
                               alias_with.payload, alias_with.semaphore)
     end
+    lock(mod_lock) do
+        module_cat_specs = get!(tracepoints, category) do
+            Dict{Symbol,TracepointSpec}()
+        end
+        module_cat_specs[kind] = spec
+
+        module_cat_funcs = get!(funcs, category) do
+            Dict{Symbol,TracepointSpec}()
+        end
+        module_cat_funcs[kind] = nothing
+    end
+
+    return spec
 end
 function create_tracepoint!(mod::Module, source, category::Symbol, kind::Symbol, lib_id, args::Expr; alias_with=nothing)
     argspec = parse_args(mod, args)
-    spec = create_tracepoint_spec(source, argspec, args; alias_with)
-    register_probe(mod, category, kind, spec)
+    spec = create_tracepoint_spec(mod, source, category, kind, argspec, args; alias_with)
     return create_tracepoint_call(repr(mod), category, kind, lib_id, argspec, spec)
 end
 # Semaphore and probe payload not yet loaded
@@ -510,13 +522,11 @@ macro region(all_args...)
     @gensym lib_id sema_set payload
 
     start_argspec = parse_args(__module__, start_args)
-    start_spec = create_tracepoint_spec(__source__, start_argspec, start_args)
-    register_probe(__module__, category, :start, start_spec)
+    start_spec = create_tracepoint_spec(__module__, __source__, category, :start, start_argspec, start_args)
     start_tp = create_tracepoint_call_loaded(repr(__module__), category, :start, 0, start_argspec, start_spec, sema_set, payload)
 
     finish_argspec = parse_args(__module__, finish_args)
-    finish_spec = create_tracepoint_spec(__source__, finish_argspec, finish_args; alias_with=start_spec)
-    register_probe(__module__, category, :finish, finish_spec)
+    finish_spec = create_tracepoint_spec(__module__, __source__, category, :finish, finish_argspec, finish_args; alias_with=start_spec)
     finish_tp = create_tracepoint_call_loaded(repr(__module__), category, :finish, lib_id, finish_argspec, finish_spec, sema_set, payload)
 
     if fn_rewrap
