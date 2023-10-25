@@ -310,14 +310,14 @@ else
     end
     probe_enabled(spec::TracepointSpec) = spec.semaphore.value[] > 0
 end
-function probe_maybe_trigger(spec::TracepointSpec, modname::String, category::Symbol, kind::Symbol, lib_id::Int64, abi_type, arg, name)
+function probe_maybe_trigger(spec::TracepointSpec, modname::String, category::Symbol, kind::Symbol, lib_id::Int64, ::Val{abi_type}, arg, name::Symbol) where {abi_type}
     if probe_enabled(spec) && spec.payload[] != C_NULL
-        probe_trigger(spec, modname, category, kind, lib_id, abi_type, arg, name)
+        probe_trigger(spec, modname, category, kind, lib_id, Val{abi_type}(), arg, name)
     else
         return 0
     end
 end
-@generated function probe_trigger(spec::TracepointSpec, modname::String, category::Symbol, kind::Symbol, lib_id::Int64, ::Val{abi_type}, arg::abi_type, name::Symbol) where {abi_type}
+@generated function probe_trigger(spec::TracepointSpec, modname::String, category::Symbol, kind::Symbol, lib_id::Int64, ::Val{abi_type}, arg, name::Symbol) where {abi_type}
     if abi_type != :Any
         if abi_type == :Nothing
             Targs = Expr(:tuple, :String, :Symbol, :Symbol, :Int64, :Symbol, :Int)
