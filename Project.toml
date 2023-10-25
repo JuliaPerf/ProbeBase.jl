@@ -1,4 +1,4 @@
-name = "ProbeBase"
+name = "Tracepoints"
 uuid = "7b3c9f6b-6d9c-4ea7-b055-3d1c3a6586ed"
 authors = ["Julian P. Samaroo <jpsamaroo@jpsamaroo.me>"]
 version = "0.1.0"
